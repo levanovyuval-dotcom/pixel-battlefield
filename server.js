@@ -1,12 +1,22 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const path = require('path'); // Added this to help locate files
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// State stored on the server
+// --- THE FIX ---
+// This tells Express to serve your index.html and other files automatically
+app.use(express.static(__dirname));
+
+// This ensures that if you visit the main URL, it sends your index.html
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+// ----------------
+
 const worldData = new Map(); 
 const users = {}; 
 
@@ -17,7 +27,6 @@ io.on('connection', (socket) => {
         socket.username = username;
         if (!users[username]) users[username] = { credits: 100, points: 0 };
         
-        // Send the current world and user stats to the person joining
         socket.emit('init', {
             world: Array.from(worldData.entries()),
             credits: users[username].credits
@@ -37,10 +46,13 @@ io.on('connection', (socket) => {
             users[username].credits--;
         }
 
-        const pixelUpdate = { color, user: username, time: new Date().toLocaleTimeString() };
+        const pixelUpdate = { 
+            color, 
+            user: username, 
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+        };
         worldData.set(key, pixelUpdate);
 
-        // Broadcast the change to EVERYONE online
         io.emit('pixelUpdated', { x, y, data: pixelUpdate, credits: users[username].credits, user: username });
     });
 
@@ -51,6 +63,13 @@ io.on('connection', (socket) => {
             socket.emit('creditsUpdated', users[username].credits);
         }
     });
+
+    socket.on('disconnect', () => {
+        console.log('User disconnected');
+    });
 });
 
-server.listen(3000, () => console.log('Server running on port 3000'));
+// --- RENDER FIX ---
+// process.env.PORT is required for Render/Railway to work online
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
