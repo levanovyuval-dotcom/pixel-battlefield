@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Massive Pixel World | Live Online</title>
+    <!-- We include the Socket.io client library here -->
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0a0a0c;
+            --panel-bg: rgba(18, 18, 22, 0.95);
+            --accent: #3b82f6;
+            --border: #2a2a2e;
+            --success: #22c55e;
+        }
+
+        body, html {
+            margin: 0; padding: 0; height: 100%; width: 100%;
+            background-color: var(--bg-dark);
+            color: #e4e4e7;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden;
+        }
+
+        #login-screen {
+            position: fixed; inset: 0; background: var(--bg-dark);
+            display: flex; align-items: center; justify-content: center; z-index: 2000;
+        }
+        .login-box {
+            background: #18181b; padding: 40px; border-radius: 16px;
+            border: 1px solid var(--border); text-align: center;
+        }
+
+        .hud { position: fixed; z-index: 100; pointer-events: none; }
+        .panel {
+            background: var(--panel-bg); border: 1px solid var(--border);
+            padding: 15px; border-radius: 12px; pointer-events: auto;
+            backdrop-filter: blur(8px); margin: 15px;
+        }
+        .top-left { top: 0; left: 0; min-width: 180px; }
+        .top-right { top: 0; right: 0; width: 240px; }
+        .bottom-center { bottom: 20px; left: 50%; transform: translateX(-50%); }
+
+        .leader-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #27272a; font-size: 13px; }
+        .online-dot { height: 8px; width: 8px; background: var(--success); border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+        #recharge-btn {
+            background: #27272a; color: white; border: 1px solid var(--border);
+            padding: 10px; border-radius: 8px; cursor: pointer; width: 100%;
+            margin-top: 15px; font-weight: 600; position: relative; overflow: hidden;
+        }
+        #recharge-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+        #recharge-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent); opacity: 0.2; width: 0%; }
+
+        input[type="text"], button.primary-btn {
+            background: #09090b; border: 1px solid var(--border);
+            color: white; padding: 12px; border-radius: 8px; outline: none; margin-bottom: 10px;
+        }
+        button.primary-btn { background: var(--accent); cursor: pointer; border: none; font-weight: bold; width: 100%; }
+
+        #tooltip {
+            position: fixed; background: #18181b; color: white;
+            padding: 8px 12px; border-radius: 6px; font-size: 12px;
+            pointer-events: none; border: 1px solid var(--border);
+            display: none; z-index: 500;
+        }
+
+        canvas { cursor: crosshair; image-rendering: pixelated; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <div class="login-box">
+            <h1>Pixel World</h1>
+            <input type="text" id="username-input" placeholder="Username" maxlength="15">
+            <button class="primary-btn" onclick="startApp()">Enter Structure</button>
+        </div>
+    </div>
+
+    <div class="hud top-left">
+        <div class="panel">
+            <div style="font-size: 10px; color: #71717a;">IDENTITY</div>
+            <div id="display-username" style="font-size: 18px; font-weight: 700;">...</div>
+            <div style="margin-top: 10px; font-size: 10px; color: #71717a;">CREDITS</div>
+            <div id="display-credits" style="font-size: 24px; font-weight: 800; color: var(--accent);">100</div>
+            
+            <button id="recharge-btn" onclick="requestRecharge()">
+                <div id="recharge-fill"></div>
+                <span id="recharge-text">RECHARGE (+50)</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="hud top-right">
+        <div class="panel">
+            <div style="font-size: 10px; color: #71717a; margin-bottom: 10px;">LIVE LEADERBOARD</div>
+            <div id="leaderboard"></div>
+        </div>
+    </div>
+
+    <div class="hud bottom-center">
+        <div class="panel" style="display: flex; align-items: center; gap: 15px;">
+            <input type="color" id="color-picker" value="#3b82f6">
+            <div style="font-size: 12px; color: #a1a1aa;">WASD/Drag to Pan • Scroll to Zoom</div>
+        </div>
+    </div>
+
+    <div id="tooltip"></div>
+    <canvas id="worldCanvas"></canvas>
+
+    <script>
+        const socket = io(); // Connects to the server hosting this file
+        const canvas = document.getElementById('worldCanvas');
+        const ctx = canvas.getContext('2d');
+        const tooltip = document.getElementById('tooltip');
+
+        let username = "";
+        const GRID_SIZE = 1000;
+        let worldData = new Map();
+        let scale = 2.0;
+        let offsetX = 0, offsetY = 0;
+
+        function startApp() {
+            const input = document.getElementById('username-input').value.trim();
+            if(!input) return;
+            username = input;
+            document.getElementById('display-username').textContent = username;
+            document.getElementById('login-screen').style.display = 'none';
+            
+            initCanvas();
+            offsetX = window.innerWidth/2 - 500;
+            offsetY = window.innerHeight/2 - 500;
+            
+            // Tell the server we joined
+            socket.emit('join', username);
+            requestAnimationFrame(render);
+        }
+
+        function initCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        // --- SERVER UPDATES ---
+        socket.on('init', (data) => {
+            // Load the existing world data from server
+            worldData = new Map(data.world);
+            document.getElementById('display-credits').textContent = data.credits;
+            updateLeaderboard();
+        });
+
+        socket.on('pixelUpdated', (update) => {
+            worldData.set(`${update.x},${update.y}`, update.data);
+            if(update.user === username) {
+                document.getElementById('display-credits').textContent = update.credits;
+            }
+            updateLeaderboard();
+        });
+
+        socket.on('creditsUpdated', (newCredits) => {
+            document.getElementById('display-credits').textContent = newCredits;
+        });
+
+        function requestRecharge() {
+            const btn = document.getElementById('recharge-btn');
+            const fill = document.getElementById('recharge-fill');
+            const text = document.getElementById('recharge-text');
+            
+            btn.disabled = true;
+            let start = Date.now();
+            const duration = 5000;
+
+            const timer = setInterval(() => {
+                let elapsed = Date.now() - start;
+                let progress = Math.min((elapsed / duration) * 100, 100);
+                fill.style.width = progress + "%";
+                text.textContent = `CHARGING ${Math.ceil((duration - elapsed)/1000)}s`;
+
+                if (elapsed >= duration) {
+                    clearInterval(timer);
+                    socket.emit('recharge'); // Tell server to add credits
+                    fill.style.width = "0%";
+                    text.textContent = "RECHARGE (+50)";
+                    btn.disabled = false;
+                }
+            }, 50);
+        }
+
+        function updateLeaderboard() {
+            const lb = document.getElementById('leaderboard');
+            const stats = {};
+            worldData.forEach(p => stats[p.user] = (stats[p.user] || 0) + 1);
+            
+            const sorted = Object.entries(stats).sort((a,b) => b[1]-a[1]).slice(0, 10);
+            lb.innerHTML = sorted.map(([u, pts]) => `
+                <div class="leader-item">
+                    <span><span class="online-dot"></span>${u}</span>
+                    <span style="font-weight:bold; color:var(--accent)">${pts}</span>
+                </div>
+            `).join('');
+        }
+
+        // --- RENDERING & INPUT ---
+        function render() {
+            ctx.fillStyle = '#0a0a0c';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
+
+            worldData.forEach((data, key) => {
+                const [x, y] = key.split(',').map(Number);
+                ctx.fillStyle = data.color;
+                ctx.fillRect(x, y, 0.9, 0.9);
+            });
+
+            ctx.restore();
+            requestAnimationFrame(render);
+        }
+
+        canvas.addEventListener('click', (e) => {
+            const worldX = Math.floor((e.clientX - offsetX) / scale);
+            const worldY = Math.floor((e.clientY - offsetY) / scale);
+            if (worldX >= 0 && worldX < GRID_SIZE && worldY >= 0 && worldY < GRID_SIZE) {
+                const color = document.getElementById('color-picker').value;
+                socket.emit('paint', { x: worldX, y: worldY, color: color });
+            }
+        });
+
+        // Add dragging and zooming listeners here (same as previous local version)
+        let isDragging = false;
+        let lastMouse = { x: 0, y: 0 };
+        canvas.addEventListener('mousedown', e => { isDragging = true; lastMouse = { x: e.clientX, y: e.clientY }; });
+        window.addEventListener('mousemove', e => {
+            if (isDragging) {
+                offsetX += e.clientX - lastMouse.x;
+                offsetY += e.clientY - lastMouse.y;
+                lastMouse = { x: e.clientX, y: e.clientY };
+            }
+            // Update tooltip logic
+            const worldX = Math.floor((e.clientX - offsetX) / scale);
+            const worldY = Math.floor((e.clientY - offsetY) / scale);
+            const data = worldData.get(`${worldX},${worldY}`);
+            if (data) {
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX + 15) + 'px';
+                tooltip.style.top = (e.clientY + 15) + 'px';
+                tooltip.innerHTML = `<b>@${data.user}</b><br>${data.time}`;
+            } else { tooltip.style.display = 'none'; }
+        });
+        window.addEventListener('mouseup', () => isDragging = false);
+        window.addEventListener('wheel', e => {
+            const factor = e.deltaY > 0 ? 0.9 : 1.1;
+            scale = Math.min(Math.max(scale * factor, 0.1), 50);
+        });
+    </script>
+</body>
+</html>
